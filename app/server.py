@@ -258,10 +258,28 @@ async def healthz(request):  # noqa: ANN001
     return PlainTextResponse("ok")
 
 
+class _InternalAuth:
+    """Require the gateway's shared bearer on /mcp (the enrollment routes and
+    /healthz stay open — they're reached directly and self-secured by state)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            token = os.environ.get("MCP_HTTP_TOKEN")
+            if token:
+                headers = dict(scope.get("headers") or [])
+                if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+                    await send({"type": "http.response.start", "status": 401,
+                                "headers": [(b"content-type", b"text/plain")]})
+                    await send({"type": "http.response.body", "body": b"Unauthorized"})
+                    return
+        await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
-    mcp.run(
-        transport="http",
-        host=os.environ.get("MCP_HTTP_HOST", "0.0.0.0"),
-        port=int(os.environ.get("PORT", "3000")),
-        path="/mcp",
-    )
+    import uvicorn
+
+    app = _InternalAuth(mcp.http_app(path="/mcp"))
+    uvicorn.run(app, host=os.environ.get("MCP_HTTP_HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "3000")))
