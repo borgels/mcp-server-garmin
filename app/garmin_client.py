@@ -1,46 +1,30 @@
-"""Garmin login + data access, built on python-garminconnect / garth.
+"""Garmin login + data access, built on python-garminconnect (>=0.3.8).
 
 IMPORTANT (unofficial API): login is the ONLY rate-limit-dangerous operation and
 Garmin blocks per-account (24-48h) on repeated logins. So we log in ONCE per
 user, persist the resulting OAuth token blob (never the password), and ride it.
 python-garminconnect handles lazy OAuth2 refresh from the ~1yr OAuth1 token.
+
+garminconnect 0.3.x dropped garth: auth is native (curl_cffi) and MFA state is
+held on the live client instance. So the MFA flow keeps the SAME Garmin object
+between the two enrollment POSTs and resumes on it; `resume_login`'s first arg
+is vestigial (the library reads the pending state from the client itself).
 """
 from __future__ import annotations
 
-import base64
-import io
-import tempfile
-from pathlib import Path
 from typing import Any
 
-# Imported lazily inside functions so tests that only exercise the store don't
-# require the heavy garminconnect/garth stack.
-
-
-def _dump_token_dir(dir_path: str) -> str:
-    """Serialize garth's token dir (oauth1 + oauth2 json) into one base64 blob."""
-    import json
-
-    files = {}
-    for name in ("oauth1_token.json", "oauth2_token.json"):
-        p = Path(dir_path) / name
-        if p.exists():
-            files[name] = p.read_text()
-    return base64.b64encode(json.dumps(files).encode()).decode()
-
-
-def _restore_token_dir(blob: str) -> str:
-    import json
-
-    files = json.loads(base64.b64decode(blob).decode())
-    d = tempfile.mkdtemp(prefix="garth-")
-    for name, content in files.items():
-        (Path(d) / name).write_text(content)
-    return d
+# garminconnect is imported lazily inside functions so tests that only exercise
+# the token store don't need the heavy auth stack installed.
 
 
 class MfaRequired(Exception):
-    """Raised when Garmin needs a 2FA code; carries a resumable client state."""
+    """Raised when Garmin needs a 2FA code; carries the live client to resume on.
+
+    `client_state` is the in-progress `Garmin` instance (name kept for the
+    enrollment route). It MUST be reused for resume_login — the MFA state lives
+    on it, not in a serializable blob.
+    """
 
     def __init__(self, client_state: Any) -> None:
         super().__init__("Garmin requires a 2FA/MFA code.")
@@ -49,34 +33,36 @@ class MfaRequired(Exception):
 
 def begin_login(email: str, password: str) -> str:
     """Attempt login. Returns a token blob on success, or raises MfaRequired."""
-    import garth
+    from garminconnect import Garmin
 
-    result1, result2 = garth.login(email, password, return_on_mfa=True)
-    if result1 == "needs_mfa":
-        raise MfaRequired(result2)
-    return _capture(garth)
+    g = Garmin(email, password, return_on_mfa=True)
+    status, _ = g.login()
+    if status == "needs_mfa":
+        raise MfaRequired(g)
+    return _capture(g)
 
 
 def resume_login(client_state: Any, mfa_code: str) -> str:
-    import garth
+    """Complete MFA on the same client instance and return the token blob."""
+    client_state.resume_login(None, mfa_code)
+    return _capture(client_state)
 
-    garth.resume_login(client_state, mfa_code)
-    return _capture(garth)
 
-
-def _capture(garth_mod: Any) -> str:
-    d = tempfile.mkdtemp(prefix="garth-out-")
-    garth_mod.save(d)
-    return _dump_token_dir(d)
+def _capture(g: Any) -> str:
+    """Serialize the authenticated session to an opaque token string (>512 chars)."""
+    return g.client.dumps()
 
 
 def make_client(token_blob: str) -> Any:
-    """Restore an authenticated python-garminconnect client from a stored blob."""
+    """Restore an authenticated python-garminconnect client from a stored blob.
+
+    login() loads the token string directly (len>512 → treated as token data,
+    not a path) and refreshes the OAuth2 token lazily — no password needed.
+    """
     from garminconnect import Garmin
 
-    d = _restore_token_dir(token_blob)
     g = Garmin()
-    g.login(d)  # resumes from token dir; refreshes OAuth2 lazily, no password
+    g.login(tokenstore=token_blob)
     return g
 
 

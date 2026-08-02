@@ -5,7 +5,7 @@ description = "MCP server for Garmin Connect (personal) with per-user login and 
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.9",
-    "garminconnect>=0.2.25",
+    "garminconnect>=0.3.8",
     "cryptography>=43",
     "uvicorn>=0.30",
     "starlette>=0.37",
