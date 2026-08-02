@@ -1,0 +1,19 @@
+[project]
+name = "mcp-server-garmin"
+version = "0.1.0"
+description = "MCP server for Garmin Connect (personal) with per-user login and encrypted token storage."
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.9",
+    "garminconnect>=0.2.25",
+    "cryptography>=43",
+    "uvicorn>=0.30",
+    "starlette>=0.37",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
