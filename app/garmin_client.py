@@ -69,3 +69,28 @@ def make_client(token_blob: str) -> Any:
 def is_rate_limit_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return "429" in text or "too many requests" in text or "rate limit" in text
+
+
+def is_auth_error(exc: Exception) -> bool:
+    """True when Garmin rejected the stored session rather than the request.
+
+    The stored OAuth1 token is long-lived but not eternal, and Garmin also
+    invalidates it on password change or a security event. When that happens
+    garminconnect raises GarminConnectAuthenticationError ("Failed to retrieve
+    social profile") or a 401 from deep inside login()/_load_profile_and_settings().
+
+    We never store the password, so this is NOT self-healing — the user has to
+    re-enroll. Detecting it lets us say so plainly instead of surfacing a
+    traceback. Matched on type name and text because the exception types differ
+    across garminconnect versions.
+    """
+    name = type(exc).__name__.lower()
+    text = f"{name}: {exc}".lower()
+    if "authentication" in name:
+        return True
+    return (
+        "401" in text
+        or "unauthorized" in text
+        or "failed to retrieve social profile" in text
+        or "invalid_grant" in text
+    )

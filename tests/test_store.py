@@ -52,3 +52,34 @@ def test_delete(tmp_path):
     assert s.delete("u@x.dk") is True
     assert s.get_record("u@x.dk") is None
     assert s.delete("u@x.dk") is False
+
+
+# --- expired-session detection -------------------------------------------
+# A stored Garmin token is long-lived but not eternal. Because the password is
+# never stored, an expired session cannot self-heal — it must be reported
+# clearly rather than surfacing a library traceback (see is_auth_error).
+
+class _AuthErr(Exception):
+    pass
+
+
+class GarminConnectAuthenticationError(Exception):
+    pass
+
+
+def test_is_auth_error_matches_the_real_garmin_failure():
+    from app import garmin_client as gc
+
+    # The exact failure seen in production when a token aged out.
+    assert gc.is_auth_error(GarminConnectAuthenticationError("Failed to retrieve social profile"))
+    assert gc.is_auth_error(_AuthErr("API Error 401 - unauthorized"))
+    assert gc.is_auth_error(_AuthErr("invalid_grant"))
+
+
+def test_is_auth_error_ignores_unrelated_failures():
+    from app import garmin_client as gc
+
+    # Rate limiting has its own handling and must not be misread as expiry.
+    assert not gc.is_auth_error(_AuthErr("429 Too Many Requests"))
+    assert not gc.is_auth_error(_AuthErr("connection reset by peer"))
+    assert not gc.is_auth_error(_AuthErr("500 internal server error"))

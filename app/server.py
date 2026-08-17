@@ -71,6 +71,17 @@ def _call(user: str, fn_name: str, *args: Any) -> Any:
         if gc.is_rate_limit_error(exc):
             store.set_rate_limited(user, int(time.time()) + 24 * 3600)
             raise RuntimeError("Garmin rate-limited this account (429). Backing off ~24h; do not retry.") from exc
+        if gc.is_auth_error(exc):
+            # The stored session is dead. Drop the cached client so a re-enroll
+            # takes effect immediately, and say plainly what to do — we cannot
+            # re-login automatically because the password is never stored.
+            _clients.pop(TokenStore.user_key(user), None)
+            raise RuntimeError(
+                "GARMIN_SESSION_EXPIRED: your stored Garmin session is no longer valid "
+                "(Garmin returned 401). This happens when the token ages out, you change "
+                "your Garmin password, or Garmin invalidates the session. Run garmin_connect "
+                "and sign in again — no data is lost, and this is not a problem with your watch."
+            ) from exc
         raise
 
 
