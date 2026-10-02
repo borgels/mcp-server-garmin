@@ -12,8 +12,8 @@ def make(tmp_path):
 
 def test_encrypts_at_rest_and_roundtrips_case_insensitive(tmp_path):
     s = make(tmp_path)
-    s.set_token_blob("ABO@borgels.com", "SECRET-BLOB-XYZ", {"foo": "bar"})
-    rec = s.get_record("abo@borgels.com")
+    s.set_token_blob("USER@Example.com", "SECRET-BLOB-XYZ", {"foo": "bar"})
+    rec = s.get_record("user@example.com")
     assert rec["blob"] == "SECRET-BLOB-XYZ"
     raw = (tmp_path / "store.json").read_text()
     assert "SECRET-BLOB-XYZ" not in raw  # encrypted at rest
