@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -116,6 +117,29 @@ class TokenStore:
         if int(time.time()) - entry["created_at"] > STATE_TTL_S:
             return None
         return entry["user"]
+
+    def confirm_state(self, state: str) -> str | None:
+        """Record that the browser explicitly confirmed the identity this state is bound to.
+
+        Returns a random nonce to hand to that browser (as a cookie), or None if the state
+        is invalid/expired. Credentials are only accepted for a state confirmed by the same
+        browser, so an enrollment link opened by someone other than the person who started
+        it cannot silently link their Garmin account to another gateway identity."""
+        if not self.peek_state(state):
+            return None
+        nonce = secrets.token_urlsafe(24)
+        self._states[state]["confirmed_nonce_hash"] = hashlib.sha256(nonce.encode()).hexdigest()
+        self._persist()
+        return nonce
+
+    def state_confirmed(self, state: str, nonce: str | None) -> bool:
+        """Whether a still-valid state was confirmed by the browser presenting `nonce`."""
+        if not nonce or not self.peek_state(state):
+            return False
+        expected = self._states[state].get("confirmed_nonce_hash")
+        if not expected:
+            return False
+        return hmac.compare_digest(expected, hashlib.sha256(nonce.encode()).hexdigest())
 
     def consume_state(self, state: str) -> str | None:
         user = self.peek_state(state)

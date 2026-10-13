@@ -13,5 +13,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install cryptography pytest
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pytest pytest-asyncio
       - run: PYTHONPATH=. python -m pytest tests/ -q
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
