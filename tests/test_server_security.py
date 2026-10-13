@@ -67,7 +67,7 @@ def test_mcp_fails_closed_when_trusting_forwarded_user_without_token(monkeypatch
 
 @pytest.fixture
 def enroll_client():
-    return TestClient(server.mcp.http_app(path="/mcp"))
+    return TestClient(server.mcp.http_app(path="/mcp"), base_url="https://testserver")
 
 
 def test_enroll_shows_identity_and_requires_confirmation(enroll_client, monkeypatch):
@@ -91,10 +91,21 @@ def test_enroll_shows_identity_and_requires_confirmation(enroll_client, monkeypa
     # Confirm step without the checkbox is refused.
     r = enroll_client.post("/garmin/enroll", data={"state": state, "step": "confirm"})
     assert r.status_code == 400
-    assert not server.store.state_confirmed(state)
+    assert not server.store.state_confirmed(state, "anything")
+
+    # Confirming in another client (no shared cookie) does not unlock credentials here.
+    other = TestClient(server.mcp.http_app(path="/mcp"), base_url="https://testserver")
+    r = other.post("/garmin/enroll", data={"state": state, "step": "confirm", "confirm_identity": "yes"})
+    assert r.status_code == 200 and "name=password" in r.text
+    enroll_client.cookies.clear()
+    r = enroll_client.post("/garmin/enroll", data={"state": state, "email": "a@b.c", "password": "pw"})
+    assert r.status_code == 400 and calls == []
 
     r = enroll_client.post("/garmin/enroll", data={"state": state, "step": "confirm", "confirm_identity": "yes"})
     assert r.status_code == 200 and "name=password" in r.text
+    set_cookie = r.headers["set-cookie"]
+    assert "garmin_enroll=" in set_cookie and "HttpOnly" in set_cookie and "Secure" in set_cookie
+    assert r.headers["x-frame-options"] == "DENY"
 
     r = enroll_client.post("/garmin/enroll", data={"state": state, "email": "a@b.c", "password": "pw"})
     assert r.status_code == 200 and calls == ["a@b.c"]
@@ -108,7 +119,8 @@ def test_enroll_error_message_is_escaped(enroll_client, monkeypatch):
 
     monkeypatch.setattr(gc, "begin_login", boom)
     state = server.store.create_state("u@example.com")
-    server.store.confirm_state(state)
+    r = enroll_client.post("/garmin/enroll", data={"state": state, "step": "confirm", "confirm_identity": "yes"})
+    assert r.status_code == 200
     r = enroll_client.post("/garmin/enroll", data={"state": state, "email": "a@b.c", "password": "pw"})
     assert r.status_code == 400
     assert "<script>" not in r.text

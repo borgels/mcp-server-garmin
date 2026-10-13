@@ -11,7 +11,7 @@ Behind an authenticating gateway that forwards the signed-in user as `X-MCP-User
 ## Security configuration
 
 - `MCP_HTTP_TOKEN` — shared bearer the gateway must send on `/mcp` (`Authorization: Bearer <token>`), compared in constant time. It is **required** when `GARMIN_TRUST_FORWARDED_USER=true`: the server refuses to start without it, because otherwise anyone who can reach the port could claim any `X-MCP-User`. Keep `/mcp` reachable only from the gateway.
-- The enrollment page shows which gateway identity the link is bound to and requires an explicit confirmation before it accepts Garmin credentials. Links are single-use and expire after 10 minutes.
+- The enrollment page shows which gateway identity the link is bound to and requires an explicit confirmation, bound to the confirming browser (HttpOnly cookie), before it accepts Garmin credentials. Links are single-use and expire after 10 minutes.
 
 ## Tools
 

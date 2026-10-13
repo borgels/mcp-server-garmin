@@ -214,7 +214,12 @@ def _page(title: str, body_html: str, ok: bool = True) -> HTMLResponse:
         f"<title>{escape(title)}</title><body style='font-family:system-ui;max-width:26rem;margin:3rem auto;padding:0 1rem'>"
         f"<h1>{'✅' if ok else '⚠️'} {escape(title)}</h1>{body_html}</body>"
     )
-    return HTMLResponse(html, status_code=200 if ok else 400)
+    return HTMLResponse(html, status_code=200 if ok else 400, headers={
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    })
 
 
 def _identity_banner(user: str) -> str:
@@ -276,6 +281,8 @@ def _mfa_pop(state: str) -> Any:
 
 
 _EXPIRED = "<p>Run garmin_connect again in Claude.</p>"
+# Cookie binding the browser that confirmed the identity to the credential submission.
+ENROLL_COOKIE = "garmin_enroll"
 
 
 @mcp.custom_route("/garmin/enroll", methods=["GET", "POST"])
@@ -298,11 +305,18 @@ async def enroll(request):  # noqa: ANN001
     if form.get("step") == "confirm":
         if form.get("confirm_identity") != "yes":
             return _page("Confirm the account", _confirm_form(state, user, error="Please tick the box to confirm."), ok=False)
-        store.confirm_state(state)
-        return _page("Connect Garmin", _form(state, user))
+        nonce = store.confirm_state(state)
+        if not nonce:
+            return _page("Link expired", _EXPIRED, ok=False)
+        resp = _page("Connect Garmin", _form(state, user))
+        resp.set_cookie(
+            ENROLL_COOKIE, nonce, max_age=10 * 60, path="/garmin", httponly=True, samesite="strict",
+            secure=os.environ.get("GARMIN_PUBLIC_BASE_URL", "https://").startswith("https:"),
+        )
+        return resp
 
-    if not store.state_confirmed(state):
-        return _page("Confirm the account", _confirm_form(state, user, error="Please confirm the account first."), ok=False)
+    if not store.state_confirmed(state, request.cookies.get(ENROLL_COOKIE)):
+        return _page("Confirm the account", _confirm_form(state, user, error="Please confirm the account in this browser first."), ok=False)
 
     try:
         if form.get("mfa"):

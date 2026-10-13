@@ -5,7 +5,7 @@
 - Security: refuse to start when `GARMIN_TRUST_FORWARDED_USER=true` and `MCP_HTTP_TOKEN` is
   unset; the `/mcp` bearer is now compared in constant time.
 - Security: the enrollment page shows the gateway identity the link is bound to and requires
-  an explicit confirmation before accepting credentials.
+  an explicit, browser-bound confirmation before accepting credentials.
 - Security: HTML-escape error text on the enrollment page; pending MFA hand-offs expire after
   10 minutes.
 - Dependencies pinned to exact versions with hashes (`requirements.lock`), used by the
