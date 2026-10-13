@@ -117,6 +117,23 @@ class TokenStore:
             return None
         return entry["user"]
 
+    def confirm_state(self, state: str) -> bool:
+        """Record that the browser explicitly confirmed the identity this state is bound to.
+
+        Credentials are only accepted for a confirmed state, so an enrollment link opened
+        by someone other than the person who started it cannot silently link their Garmin
+        account to another gateway identity."""
+        if not self.peek_state(state):
+            return False
+        self._states[state]["confirmed"] = True
+        self._persist()
+        return True
+
+    def state_confirmed(self, state: str) -> bool:
+        if not self.peek_state(state):
+            return False
+        return bool(self._states[state].get("confirmed"))
+
     def consume_state(self, state: str) -> str | None:
         user = self.peek_state(state)
         if state in self._states:
