@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+### Changes
+
+- HTTP: the server refuses to start on a non-loopback bind (default `0.0.0.0`)
+  without `MCP_HTTP_TOKEN`, unless `MCP_HTTP_ALLOW_UNAUTHENTICATED=true`; the
+  escape hatch never applies with `GARMIN_TRUST_FORWARDED_USER=true`.
+- HTTP: `MCP_HTTP_TOKEN` must be at least 32 printable ASCII characters.
+- HTTP: failed `/mcp` authentications are limited per client address (429 with
+  `Retry-After`); valid tokens are never throttled. New `MCP_AUTH_FAILURE_LIMIT`
+  (default 20, `0` disables) and `MCP_AUTH_FAILURE_WINDOW_MS` (default 60000).
+- HTTP: 401 responses carry `WWW-Authenticate: Bearer`.
+- `PORT`, the limits above and `MCP_HTTP_ALLOW_UNAUTHENTICATED` are validated at
+  startup; invalid values stop the server with a clear message.
+- The MCP server reports the package version.
+- Dependencies: in-range lock refresh (`fastmcp` 4.2.0, `authlib`, `certifi`,
+  `dnspython`, `joserfc`, `opentelemetry-api`) so `pip-audit` reports no known
+  vulnerabilities. CI runs `pip-audit`, uses pinned actions and builds the image
+  on pull requests; images are published only after tests pass, with SBOM and
+  provenance. Grouped Dependabot updates, `.dockerignore`, `.gitattributes`.
+
+### Upgrade notes
+
+- A deployment on the default `0.0.0.0` bind must set `MCP_HTTP_TOKEN` (it
+  already must with `GARMIN_TRUST_FORWARDED_USER=true`) of at least 32
+  characters. A shorter token now stops the server.
+- Invalid values for the variables above now stop the server at startup.
+- Unchanged: `/garmin/enroll` and `/healthz` remain reachable without the
+  bearer; existing variable names are unchanged.
+
+### Also in this release
 
 - Security: refuse to start when `GARMIN_TRUST_FORWARDED_USER=true` and `MCP_HTTP_TOKEN` is
   unset; the `/mcp` bearer is now compared in constant time.

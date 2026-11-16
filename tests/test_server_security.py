@@ -26,9 +26,49 @@ def test_refuses_to_start_when_trusting_forwarded_user_without_token():
         server.check_startup_config({"GARMIN_TRUST_FORWARDED_USER": "true", "MCP_HTTP_TOKEN": "   "})
 
 
+TOKEN = "a" * 64
+
+
 def test_starts_with_token_or_without_trust():
-    server.check_startup_config({"GARMIN_TRUST_FORWARDED_USER": "true", "MCP_HTTP_TOKEN": "s3cret-token"})
-    server.check_startup_config({})
+    server.check_startup_config({"GARMIN_TRUST_FORWARDED_USER": "true", "MCP_HTTP_TOKEN": TOKEN})
+    server.check_startup_config({"MCP_HTTP_HOST": "127.0.0.1"})
+    settings = server.check_startup_config({"MCP_HTTP_TOKEN": f" {TOKEN}\n", "PORT": "8080"})
+    assert settings["host"] == "0.0.0.0" and settings["port"] == 8080
+
+
+def test_refuses_non_loopback_bind_without_token_unless_explicitly_allowed():
+    with pytest.raises(SystemExit) as exc:
+        server.check_startup_config({})
+    assert "MCP_HTTP_TOKEN" in str(exc.value)
+    with pytest.raises(SystemExit):
+        server.check_startup_config({"MCP_HTTP_HOST": "10.0.0.5"})
+    server.check_startup_config({"MCP_HTTP_ALLOW_UNAUTHENTICATED": "true"})
+    for host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        server.check_startup_config({"MCP_HTTP_HOST": host})
+    # The escape hatch never allows a trusted X-MCP-User without a token.
+    with pytest.raises(SystemExit):
+        server.check_startup_config({"MCP_HTTP_ALLOW_UNAUTHENTICATED": "true", "GARMIN_TRUST_FORWARDED_USER": "true"})
+
+
+def test_rejects_weak_tokens_and_invalid_numbers():
+    with pytest.raises(SystemExit, match="at least 32"):
+        server.check_startup_config({"MCP_HTTP_TOKEN": "s3cret-token"})
+    with pytest.raises(SystemExit, match="printable ASCII"):
+        server.check_startup_config({"MCP_HTTP_TOKEN": TOKEN + " x"})
+    for name, value in (("PORT", "abc"), ("PORT", "0"), ("PORT", "70000"), ("MCP_AUTH_FAILURE_LIMIT", "-1"),
+                        ("MCP_AUTH_FAILURE_WINDOW_MS", "1m"), ("MCP_HTTP_ALLOW_UNAUTHENTICATED", "maybe")):
+        with pytest.raises(SystemExit, match=name):
+            server.check_startup_config({"MCP_HTTP_TOKEN": TOKEN, name: value})
+
+
+def test_version_matches_pyproject():
+    import pathlib
+    import tomllib
+
+    from app import __version__
+
+    pyproject = tomllib.loads((pathlib.Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert __version__ == pyproject["project"]["version"]
 
 
 def test_bearer_compare():
@@ -38,12 +78,12 @@ def test_bearer_compare():
     assert not server._bearer_ok(b"s3cret", "s3cret")
 
 
-def _wrapped_client():
+def _wrapped_client(**limits):
     async def ok(request):
         return PlainTextResponse("inner")
 
     inner = Starlette(routes=[Route("/mcp", ok, methods=["GET", "POST"]), Route("/healthz", ok)])
-    return TestClient(server._InternalAuth(inner))
+    return TestClient(server._InternalAuth(inner, **limits))
 
 
 def test_mcp_requires_bearer_when_token_set(monkeypatch):
@@ -51,7 +91,9 @@ def test_mcp_requires_bearer_when_token_set(monkeypatch):
     monkeypatch.setenv("GARMIN_TRUST_FORWARDED_USER", "true")
     c = _wrapped_client()
     assert c.get("/mcp", headers={"x-mcp-user": "victim@example.com"}).status_code == 401
-    assert c.get("/mcp", headers={"authorization": "Bearer wrong"}).status_code == 401
+    wrong = c.get("/mcp", headers={"authorization": "Bearer wrong"})
+    assert wrong.status_code == 401
+    assert wrong.headers["www-authenticate"] == "Bearer"
     assert c.get("/mcp", headers={"authorization": "Bearer s3cret"}).status_code == 200
     assert c.get("/healthz").status_code == 200
 
@@ -61,6 +103,38 @@ def test_mcp_fails_closed_when_trusting_forwarded_user_without_token(monkeypatch
     monkeypatch.setenv("GARMIN_TRUST_FORWARDED_USER", "true")
     c = _wrapped_client()
     assert c.get("/mcp", headers={"x-mcp-user": "victim@example.com"}).status_code == 401
+
+
+def test_failed_auth_is_throttled_but_valid_token_is_not(monkeypatch):
+    monkeypatch.setenv("MCP_HTTP_TOKEN", TOKEN)
+    c = _wrapped_client(auth_failure_limit=3)
+    bad = {"authorization": "Bearer nope"}
+    good = {"authorization": f"Bearer {TOKEN}"}
+    for _ in range(3):
+        assert c.get("/mcp", headers=bad).status_code == 401
+    blocked = c.get("/mcp", headers=bad)
+    assert blocked.status_code == 429
+    assert int(blocked.headers["retry-after"]) > 0
+    assert c.get("/mcp", headers=good).status_code == 200
+    assert c.get("/healthz").status_code == 200
+
+
+def test_auth_failure_limit_zero_disables_throttling(monkeypatch):
+    monkeypatch.setenv("MCP_HTTP_TOKEN", TOKEN)
+    c = _wrapped_client(auth_failure_limit=0)
+    for _ in range(30):
+        assert c.get("/mcp", headers={"authorization": "Bearer nope"}).status_code == 401
+
+
+def test_limiter_memory_is_bounded_and_window_expires():
+    limiter = server._AuthFailureLimiter(2, 60, max_entries=100)
+    for i in range(1000):
+        limiter.record_failure(f"k{i}", now=0)
+    assert len(limiter._entries) <= 100
+    limiter.record_failure("a", now=0)
+    limiter.record_failure("a", now=0)
+    assert limiter.retry_after("a", now=1) == 59
+    assert limiter.retry_after("a", now=61) == 0
 
 
 # --- enrollment page ----------------------------------------------------------

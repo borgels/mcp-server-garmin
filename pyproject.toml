@@ -1,6 +1,6 @@
 [project]
 name = "mcp-server-garmin"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for Garmin Connect (personal) with per-user login and encrypted token storage."
 requires-python = ">=3.11"
 dependencies = [

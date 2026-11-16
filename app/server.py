@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
+import math
 import os
+import sys
 import time
 from html import escape
 from typing import Any
@@ -18,10 +21,11 @@ from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
 from starlette.responses import HTMLResponse, PlainTextResponse
 
+from . import __version__
 from .store import TokenStore
 from . import garmin_client as gc
 
-mcp = FastMCP("garmin")
+mcp = FastMCP("garmin", version=__version__)
 store = TokenStore()
 _clients: dict[str, Any] = {}  # in-memory Garmin client cache per user
 # state -> (monotonic expiry, client_state); transient MFA hand-off, dropped after MFA_PENDING_TTL_S
@@ -350,26 +354,150 @@ def _bearer_ok(authorization: bytes, token: str) -> bool:
     return hmac.compare_digest(expected, supplied)
 
 
-def check_startup_config(env: Any = None) -> None:
-    """Refuse to start in a configuration where X-MCP-User could be forged.
+# --- startup configuration ---------------------------------------------------
 
-    With GARMIN_TRUST_FORWARDED_USER=true every tool trusts the X-MCP-User header,
-    so /mcp must only be reachable by the gateway, which requires MCP_HTTP_TOKEN."""
+MIN_TOKEN_LENGTH = 32
+DEFAULT_AUTH_FAILURE_LIMIT = 20
+DEFAULT_AUTH_FAILURE_WINDOW_MS = 60_000
+_TRUE = {"true", "1", "yes", "on"}
+_FALSE = {"false", "0", "no", "off"}
+
+
+def _env_int(env: Any, name: str, default: int, lo: int, hi: int) -> int:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        value = None
+    if value is None or not lo <= value <= hi:
+        raise SystemExit(f"Refusing to start: {name} must be an integer between {lo} and {hi}; got {raw[:40]!r}.")
+    return value
+
+
+def _env_bool(env: Any, name: str) -> bool:
+    raw = (env.get(name) or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    raise SystemExit(f'Refusing to start: {name} must be "true" or "false"; got {raw[:40]!r}.')
+
+
+def _is_loopback(host: str) -> bool:
+    h = host.strip().lower().strip("[]").rstrip(".")
+    if h in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def check_startup_config(env: Any = None) -> dict[str, Any]:
+    """Validate the HTTP configuration and refuse to start in an unsafe one.
+
+    - With GARMIN_TRUST_FORWARDED_USER=true every tool trusts the X-MCP-User
+      header, so /mcp must only be reachable by the gateway: MCP_HTTP_TOKEN is
+      required (MCP_HTTP_ALLOW_UNAUTHENTICATED does not override this).
+    - A non-loopback bind without MCP_HTTP_TOKEN is refused unless
+      MCP_HTTP_ALLOW_UNAUTHENTICATED=true.
+    - MCP_HTTP_TOKEN must be at least 32 printable ASCII characters.
+    - PORT and the auth-failure limits must be valid integers.
+
+    Returns the validated settings."""
     env = os.environ if env is None else env
-    if env.get("GARMIN_TRUST_FORWARDED_USER") == "true" and not (env.get("MCP_HTTP_TOKEN") or "").strip():
+    token = (env.get("MCP_HTTP_TOKEN") or "").strip()
+    trust = env.get("GARMIN_TRUST_FORWARDED_USER") == "true"
+    host = (env.get("MCP_HTTP_HOST") or "").strip() or "0.0.0.0"
+    settings = {
+        "host": host,
+        "port": _env_int(env, "PORT", 3000, 1, 65_535),
+        "auth_failure_limit": _env_int(env, "MCP_AUTH_FAILURE_LIMIT", DEFAULT_AUTH_FAILURE_LIMIT, 0, 1_000_000),
+        "auth_failure_window_ms": _env_int(
+            env, "MCP_AUTH_FAILURE_WINDOW_MS", DEFAULT_AUTH_FAILURE_WINDOW_MS, 1, 86_400_000
+        ),
+    }
+    allow_unauthenticated = _env_bool(env, "MCP_HTTP_ALLOW_UNAUTHENTICATED")
+
+    if token and len(token) < MIN_TOKEN_LENGTH:
+        raise SystemExit(
+            f"Refusing to start: MCP_HTTP_TOKEN must be at least {MIN_TOKEN_LENGTH} characters long "
+            "(for example: openssl rand -hex 32)."
+        )
+    if token and not all(0x21 <= ord(ch) <= 0x7E for ch in token):
+        raise SystemExit("Refusing to start: MCP_HTTP_TOKEN must only contain printable ASCII characters without whitespace.")
+    if trust and not token:
         raise SystemExit(
             "Refusing to start: GARMIN_TRUST_FORWARDED_USER=true requires MCP_HTTP_TOKEN "
             "(the shared bearer the gateway sends on /mcp). Without it, anyone who can reach "
             "this port could act as any user. Set MCP_HTTP_TOKEN to a long random secret."
         )
+    if not token and not allow_unauthenticated and not _is_loopback(host):
+        raise SystemExit(
+            f"Refusing to start: listening on {host} (MCP_HTTP_HOST, default 0.0.0.0) without MCP_HTTP_TOKEN. "
+            "Set MCP_HTTP_TOKEN, set MCP_HTTP_HOST=127.0.0.1, or set MCP_HTTP_ALLOW_UNAUTHENTICATED=true "
+            "if access is restricted by other means."
+        )
+    return settings
+
+
+class _AuthFailureLimiter:
+    """Fixed-window count of failed /mcp authentications per client address.
+    Memory is bounded; expired entries are swept and, if still full, the oldest
+    entry is evicted."""
+
+    def __init__(self, limit: int, window_s: float, max_entries: int = 10_000) -> None:
+        self.limit = limit
+        self.window_s = window_s
+        self.max_entries = max_entries
+        self._entries: dict[str, list[float]] = {}  # key -> [count, reset_at]
+
+    def retry_after(self, key: str, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        entry = self._entries.get(key)
+        if not entry:
+            return 0
+        if entry[1] <= now:
+            del self._entries[key]
+            return 0
+        return max(1, math.ceil(entry[1] - now)) if entry[0] >= self.limit else 0
+
+    def record_failure(self, key: str, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        entry = self._entries.get(key)
+        if entry and entry[1] > now:
+            entry[0] += 1
+            return entry[0] == self.limit
+        self._entries.pop(key, None)
+        if len(self._entries) >= self.max_entries:
+            for k in [k for k, e in self._entries.items() if e[1] <= now]:
+                del self._entries[k]
+            if len(self._entries) >= self.max_entries:
+                del self._entries[next(iter(self._entries))]
+        self._entries[key] = [1, now + self.window_s]
+        return self.limit == 1
 
 
 class _InternalAuth:
     """Require the gateway's shared bearer on /mcp (the enrollment routes and
-    /healthz stay open — they're reached directly and self-secured by state)."""
+    /healthz stay open — they're reached directly and self-secured by state).
+    Failed authentications are limited per client address; a valid token is
+    never throttled."""
 
-    def __init__(self, app: Any) -> None:
+    def __init__(
+        self,
+        app: Any,
+        auth_failure_limit: int = DEFAULT_AUTH_FAILURE_LIMIT,
+        auth_failure_window_ms: int = DEFAULT_AUTH_FAILURE_WINDOW_MS,
+    ) -> None:
         self.app = app
+        self.limiter = (
+            _AuthFailureLimiter(auth_failure_limit, auth_failure_window_ms / 1000) if auth_failure_limit > 0 else None
+        )
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         path = scope.get("path") or ""
@@ -379,20 +507,44 @@ class _InternalAuth:
                 headers = dict(scope.get("headers") or [])
                 # Fail closed: a trusted X-MCP-User without a configured token is never accepted.
                 if not token or not _bearer_ok(headers.get(b"authorization", b""), token):
-                    await send({"type": "http.response.start", "status": 401,
-                                "headers": [(b"content-type", b"text/plain")]})
-                    await send({"type": "http.response.body", "body": b"Unauthorized"})
+                    client = scope.get("client") or ("unknown", 0)
+                    remote = str(client[0])
+                    if self.limiter:
+                        retry_after = self.limiter.retry_after(remote)
+                        if retry_after > 0:
+                            await _plain(send, 429, b"Too many failed authentication attempts",
+                                         [(b"retry-after", str(retry_after).encode())])
+                            return
+                        if self.limiter.record_failure(remote):
+                            print(f"[http] {remote} reached {self.limiter.limit} failed authentication attempts; "
+                                  "further failures get 429", file=sys.stderr)
+                    await _plain(send, 401, b"Unauthorized", [(b"www-authenticate", b"Bearer")])
                     return
         await self.app(scope, receive, send)
 
 
-def build_app() -> Any:
-    check_startup_config()
-    return _InternalAuth(mcp.http_app(path="/mcp"))
+async def _plain(send: Any, status: int, body: bytes, extra_headers: list[tuple[bytes, bytes]]) -> None:
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"text/plain"), *extra_headers]})
+    await send({"type": "http.response.body", "body": body})
+
+
+def build_app(env: Any = None) -> Any:
+    settings = check_startup_config(env)
+    return _InternalAuth(
+        mcp.http_app(path="/mcp"),
+        auth_failure_limit=settings["auth_failure_limit"],
+        auth_failure_window_ms=settings["auth_failure_window_ms"],
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    app = build_app()
-    uvicorn.run(app, host=os.environ.get("MCP_HTTP_HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "3000")))
+    try:
+        settings = check_startup_config()
+        app = build_app()
+    except SystemExit as exc:
+        print(f"Garmin MCP HTTP server not started: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    uvicorn.run(app, host=settings["host"], port=settings["port"])
