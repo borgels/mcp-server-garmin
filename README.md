@@ -38,7 +38,7 @@ python -m app.server   # /mcp + /garmin/enroll on :3000
 PYTHONPATH=. pytest tests/
 ```
 
-Dependencies are pinned with hashes in `requirements.lock`. To update them, edit `pyproject.toml` and regenerate:
+Dependencies are pinned with hashes in `requirements.lock`. CI runs `pip-audit` against the lock on pull requests and as part of every publish (including the weekly rebuild): a newly published advisory for a pinned package blocks image publishing until the lock is refreshed. To update them, edit `pyproject.toml` and regenerate:
 
 ```bash
 uv pip compile pyproject.toml --generate-hashes --universal --python-version 3.12 -o requirements.lock

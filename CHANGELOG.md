@@ -21,6 +21,11 @@
   on pull requests; images are published only after tests pass, with SBOM and
   provenance. Grouped Dependabot updates, `.dockerignore`, `.gitattributes`.
 
+- Note: because publishing runs CI first, a newly published advisory for a
+  pinned dependency also blocks the weekly image rebuild until
+  `requirements.lock` is refreshed (intentional: no image is published with a
+  known-vulnerable lock).
+
 ### Upgrade notes
 
 - A deployment on the default `0.0.0.0` bind must set `MCP_HTTP_TOKEN` (it

@@ -529,8 +529,9 @@ async def _plain(send: Any, status: int, body: bytes, extra_headers: list[tuple[
     await send({"type": "http.response.body", "body": body})
 
 
-def build_app(env: Any = None) -> Any:
-    settings = check_startup_config(env)
+def build_app(env: Any = None, settings: dict[str, Any] | None = None) -> Any:
+    """Build the ASGI app; validates the configuration unless already-validated settings are passed."""
+    settings = check_startup_config(env) if settings is None else settings
     return _InternalAuth(
         mcp.http_app(path="/mcp"),
         auth_failure_limit=settings["auth_failure_limit"],
@@ -543,8 +544,9 @@ if __name__ == "__main__":
 
     try:
         settings = check_startup_config()
-        app = build_app()
     except SystemExit as exc:
-        print(f"Garmin MCP HTTP server not started: {exc}", file=sys.stderr)
+        reason = str(exc).removeprefix("Refusing to start: ")
+        print(f"Garmin MCP HTTP server not started: {reason}", file=sys.stderr)
         raise SystemExit(1) from None
+    app = build_app(settings=settings)
     uvicorn.run(app, host=settings["host"], port=settings["port"])
